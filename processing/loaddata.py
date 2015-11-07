@@ -6,11 +6,10 @@ import os
 import sys
 
 import requests
-from elasticsearch import Elasticsearch, NotFoundError
-from elasticsearch.client import IndicesClient
+from elasticsearch_dsl import connections
 from xylose.scielodocument import Article, Journal
 
-from publication import utils
+from publication import utils, es_persistence
 import choices
 
 logger = logging.getLogger(__name__)
@@ -18,13 +17,15 @@ logger = logging.getLogger(__name__)
 config = utils.Configuration.from_env()
 settings = dict(config.items())
 
-ARTICLEMETA = "http://articlemeta.scielo.org/api/v1"
+ARTICLEMETA = "http://localhost:7000/api/v1"
 ISO_3166_COUNTRY_AS_KEY = {value: key for key, value in choices.ISO_3166.items()}
 
 FROM = datetime.now() - timedelta(days=30)
 FROM.isoformat()[:10]
 
-ES = Elasticsearch(settings['app:main']['elasticsearch'], timeout=360)
+connections.connections.create_connection(hosts=[settings['app:main']['elasticsearch']], timeout=360)
+
+publication = {}
 
 
 def _config_logging(logging_level='INFO', logging_file=None):
@@ -59,7 +60,7 @@ def do_request(url, params):
     try:
         response = requests.get(url, params=params).json()
     except:
-        logger.error('Fail to load url: %s, %s' % url, str(params))
+        logger.error('Fail to load url: %s, %s' % (url, str(params)))
         return None
 
     return response
@@ -70,19 +71,20 @@ def fmt_document(document):
 
 
 def fmt_journal(document):
-    data = {}
+    ESjournal = es_persistence.Journal()
 
-    data['id'] = '_'.join([document.collection_acronym, document.scielo_issn])
-    data['issn'] = document.scielo_issn
-    data['collection'] = document.collection_acronym
-    data['subject_areas'] = document.subject_areas
-    data['included_at_year'] = document.creation_date[0:4]
-    data['status'] = document.current_status
-    data['title'] = document.title
+    ESjournal.id = '_'.join([document.collection_acronym, document.scielo_issn])
+    ESjournal._id = ESjournal.id
+    ESjournal.issn = document.scielo_issn
+    ESjournal.collection = document.collection_acronym
+    ESjournal.subject_areas = document.subject_areas
+    ESjournal.included_at_year = document.creation_date[0:4]
+    ESjournal.status = document.current_status
+    ESjournal.title = document.title
     permission = document.permissions or {'id': 'undefined'}
-    data['license'] = permission.get('id' or 'undefined')
+    ESjournal.license = permission.get('id' or 'undefined')
 
-    yield data
+    yield ESjournal
 
 
 def country(country):
@@ -125,52 +127,55 @@ def acceptancedelta(received, accepted):
         return days
 
 def fmt_article(document, collection='BR'):
-    data = {}
+    ESarticle = es_persistence.Article()
 
-    data['id'] = '_'.join([document.collection_acronym, document.publisher_id])
-    data['pid'] = document.publisher_id
-    data['issn'] = document.journal.scielo_issn
-    data['journal_title'] = document.journal.title
-    data['issue'] = '_'.join([document.collection_acronym, document.publisher_id[0:18]])
-    data['processing_year'] = document.processing_date[0:4]
-    data['processing_date'] = document.processing_date
-    data['publication_date'] = document.publication_date
-    data['publication_year'] = document.publication_date[0:4]
+    ESarticle.id = '_'.join([document.collection_acronym, document.publisher_id])
+    ESarticle._id = ESarticle.id
+    ESarticle.pid = document.publisher_id
+    ESarticle.issn = document.journal.scielo_issn
+    ESarticle.journal_title = document.journal.title
+    ESarticle.issue = '_'.join([document.collection_acronym, document.publisher_id[0:18]])
+    ESarticle.processing_year = document.processing_date[0:4]
+    ESarticle.processing_date = document.processing_date
+    ESarticle.publication_date = document.publication_date
+    ESarticle.publication_year = document.publication_date[0:4]
     subject_areas = document.journal.subject_areas or ['undefined']
-    data['subject_areas'] = [i for i in subject_areas]
-    data['collection'] = document.collection_acronym
-    data['document_type'] = document.document_type
+    ESarticle.subject_areas = [i for i in subject_areas]
+    ESarticle.collection = document.collection_acronym
+    ESarticle.document_type = document.document_type
     pgs = pages(document.start_page, document.end_page)
-    data['pages'] = pgs
-    data['languages'] = list(set(document.languages()+[document.original_language() or 'undefined']))
-    data['aff_countries'] = ['undefined']
+    ESarticle.pages = pgs
+    ESarticle.languages = list(set(document.languages()+[document.original_language() or 'undefined']))
+    ESarticle.aff_countries = ['undefined']
     if document.mixed_affiliations:
-        data['aff_countries'] = list(set([country(aff.get('country', 'undefined')) for aff in document.mixed_affiliations]))
-    data['citations'] = len(document.citations or [])
-    data['authors'] = len(document.authors or [])
+        ESarticle.aff_countries = list(set([country(aff.get('country', 'undefined')) for aff in document.mixed_affiliations]))
+    ESarticle.citations = len(document.citations or [])
+    ESarticle.authors = len(document.authors or [])
     permission = document.permissions or {'id': 'undefined'}
-    data['license'] = permission.get('id' or 'undefined')
+    ESarticle.license = permission.get('id' or 'undefined')
     if document.doi:
-        data['doi'] = document.doi
-        data['doi_prefix'] = document.doi.split('/')[0]
+        ESarticle.doi = document.doi
+        ESarticle.doi_prefix = document.doi.split('/')[0]
 
     delta = acceptancedelta(document.receive_date, document.acceptance_date)
     if delta:
-        data['acceptance_delta'] = delta
+        ESarticle.acceptance_delta = delta
 
-    yield data
+    yield ESarticle
 
 def fmt_citation(document, collection='BR'):
 
     for citation in document.citations or []:
-        data = {}
-        data['id'] = '_'.join([document.collection_acronym, document.publisher_id, str(citation.index_number)])
-        data['pid'] = document.publisher_id
-        data['citation_type'] = citation.publication_type
-        data['publication_year'] = citation.date[0:4]
-        data['collection'] = document.collection_acronym
+        EScitation = es_persistence.Citation()
+        EScitation.id = '_'.join([document.collection_acronym, document.publisher_id, str(citation.index_number)])
+        EScitation._id = EScitation.id
+        EScitation.pid = document.publisher_id
+        EScitation.citation_type = citation.publication_type
+        if citation.date:
+            EScitation.publication_year = citation.date[0:4]
+        EScitation.collection = document.collection_acronym
 
-        yield data
+        yield EScitation
 
 
 def documents(endpoint, fmt=None, from_date=FROM, identifiers=False):
@@ -243,145 +248,8 @@ def documents(endpoint, fmt=None, from_date=FROM, identifiers=False):
 
 def run(doc_type, from_date=FROM, identifiers=False):
 
-    journal_settings_mappings = {      
-        "mappings": {
-            "journal": {
-                "properties": {
-                    "collection": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "id": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "issn": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "subject_areas": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "title": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "included_at_year": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "status": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "license": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    }
-                }
-            },
-            "citation": {
-                "properties": {
-                    "collection": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "id": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "pid": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "citation_type": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "publication_year": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    }
-                }
-            },
-            "article": {
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "pid": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "issn": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "issue": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "subject_areas": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "collection": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "languages": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "aff_countries": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "document_type": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "journal_title": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "license": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "processing_year": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "processing_date": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "publication_year": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "publication_date": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "doi": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    },
-                    "doi_prefix": {
-                        "type": "string",
-                        "index" : "not_analyzed"
-                    }
-                }
-            }
-        }
-    }
-
     try:
-        ES.indices.create(index='publication', body=journal_settings_mappings)
+        es_persistence.publication.create()
     except:
         logger.debug('Index already available')
 
@@ -395,14 +263,14 @@ def run(doc_type, from_date=FROM, identifiers=False):
         endpoint = 'article'
         fmt = fmt_citation
     else:
-        logger.error('Invalid doc_type')
+        logger.error('Invalid doc_type: %s'%doc_type)
         exit()
 
     for event, document in documents(endpoint, fmt, from_date=from_date, identifiers=identifiers):
         if event == 'delete':
             logger.debug('removing document %s from index %s' % (document['id'], doc_type))
             try:
-                ES.delete(index='publication', doc_type=doc_type, id=document['id'])
+                document.delete()
             except NotFoundError:
                 logger.debug('Record already removed: %s' % document['id'])
             except:
@@ -410,13 +278,10 @@ def run(doc_type, from_date=FROM, identifiers=False):
 
         else: # event would be ['add', 'update']
             logger.debug('loading document %s into index %s' % (document['id'], doc_type))
-            ES.index(
-                index='publication',
-                doc_type=doc_type,
-                id=document['id'],
-                body=document
-            )
+            document.save()
 
+
+        
 def main():
 
     parser = argparse.ArgumentParser(

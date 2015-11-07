@@ -16,6 +16,7 @@ install_requires = [
     'thriftpy>=0.2.0',
     'thriftpywrap',
     'xylose',
+    'elasticsearch-dsl',
     'pyramid>=1.5.7',
     'pyramid_chameleon',
     'pyramid_mako',
@@ -48,7 +49,8 @@ setup(
     ],
     dependency_links=[
         "git+https://github.com/scieloorg/xylose@0.33#egg=xylose",
-        "git+https://github.com/scieloorg/thriftpy-wrap@0.1.1#egg=thriftpywrap"
+        "git+https://github.com/scieloorg/thriftpy-wrap@0.1.1#egg=thriftpywrap",
+        "-e git+https://github.com/elastic/elasticsearch-dsl-py@0.0.9#egg=elasticsearch-dsl"
     ],
     include_package_data=True,
     zip_safe=False,
